@@ -1,108 +1,96 @@
-"""
-XRPL Python Example: Wallet Creation + Account Info + Time-Locked Escrow
-This script demonstrates:
-1. Connecting to the XRPL Testnet
-2. Creating a new test wallet and funding it
-3. Retrieving account information
-4. Creating a time-locked escrow transaction
-"""
-
-# --------------------------
-# Import required libraries
-# --------------------------
 from xrpl.clients import JsonRpcClient
 from xrpl.wallet import generate_faucet_wallet
+from xrpl.core import addresscodec
 from xrpl.models.requests.account_info import AccountInfo
-from xrpl.models.transactions import EscrowCreate
-from xrpl.transaction import safe_sign_and_submit_transaction, send_reliable_submission
-from xrpl.utils import xrp_to_drops
-import datetime
-import json
+from xrpl.models.requests.account_objects import AccountObjects
+from xrpl.models.transactions import EscrowCreate, EscrowFinish, EscrowCancel
+from xrpl.transaction import submit_and_wait
 
-# --------------------------
-# Step 1: Connect to XRPL Testnet
-# --------------------------
+from xrpl.utils import datetime_to_ripple_time
+import json 
+import time 
+from datetime import datetime 
+
 json_rpc_url = "https://s.altnet.rippletest.net:51234/"
-client = JsonRpcClient(json_rpc_url)
-print("Connected to XRPL Testnet at:", json_rpc_url)
+client = JsonRpcClient(json_rpc_url) #connecting to testnet
 
-# --------------------------
-# Step 2: Create a new wallet and fund with Testnet XRP
-# --------------------------
-print("\nCreating a new wallet and funding it with Testnet XRP...")
-test_wallet = generate_faucet_wallet(client, debug=True)
-test_account = test_wallet.classic_address
-print(f"Wallet Address: {test_account}")
-print(f"Testnet Explorer URL: https://testnet.xrpl.org/accounts/{test_account}")
 
-# --------------------------
-# Step 3: Get account info for this wallet
-# --------------------------
-print("\nFetching account info...")
-acct_info = AccountInfo(
-    account=test_account,
-    ledger_index="validated",
-    strict=True,
+print("\nCreating a new wallet (PAYER) and funding it with Testnet XRP...") # Create a wallet using the Testnet faucet
+payer_test_wallet = generate_faucet_wallet(client, debug=True)
+payer_test_account = payer_test_wallet.classic_address
+print(f"Payer's Wallet: {payer_test_account}")
+print(f"Account Testnet Explorer URL: ")
+print(f" https://testnet.xrpl.org/accounts/{payer_test_account}")
+
+print("\nCreating a new wallet (RECIEVER) and funding it with Testnet XRP...") # Create a wallet using the Testnet faucet
+reciever_test_wallet = generate_faucet_wallet(client, debug=True)
+reciever_test_account = reciever_test_wallet.classic_address
+print(f"reciever's Wallet: {reciever_test_account}")
+print(f"Account Testnet Explorer URL: ")
+print(f" https://testnet.xrpl.org/accounts/{reciever_test_account}")
+
+def show_acc_info(address: str): 
+    print("\nGetting account info...") #account info 
+    acct_info = AccountInfo(
+        account=address,
+        ledger_index="validated",
+        strict=True,
+    )
+    response = client.request(acct_info)
+    result = response.result
+    print("Response Status: ", response.status)
+    print(json.dumps(response.result, indent=4, sort_keys=True))
+
+''' #for test
+show_acc_info(payer_test_account)  
+show_acc_info(reciever_test_account)
+'''
+def ripple_time_now(seconds:int) -> int:
+    now = datetime_to_ripple_time(datetime.now())
+    return now + int(seconds)
+
+amount_drops = "1000000"
+finish = ripple_time_now(10)
+cancel = ripple_time_now(60)
+
+new_escrow = EscrowCreate(
+    account=payer_test_account,
+    amount=amount_drops,
+    destination=reciever_test_account,
+    finish_after=finish,
+    cancel_after=cancel,
+)
+print("\nSubmitting EscrowCreate...")
+escrow_resp = submit_and_wait(new_escrow, client, payer_test_wallet)
+print(json.dumps(escrow_resp.result, indent=2))
+
+
+escrow_owner = payer_test_account
+escrow_id = escrow_resp.result['tx_json']['Sequence']
+
+
+#time.sleep(12) #to fast forward, for testing purposes 
+expire_escrow = EscrowFinish(
+    account=reciever_test_account,
+    owner=escrow_owner,
+    offer_sequence=int(escrow_id),
+)
+print("\nSubmitting EscrowFinish (GOV claims)...")
+finish_resp = submit_and_wait(expire_escrow, client, reciever_test_wallet)
+print(json.dumps(finish_resp.result, indent=2))
+
+
+# Wait until cancel_after time has passed
+time.sleep(75)  # 75 seconds to ensure ripple ledger time has passed cancel_after
+
+cancel_escrow = EscrowCancel(
+     account=payer_test_account,   # the payer wants to cancel
+    owner=escrow_owner,            # escrow owner is payer
+    offer_sequence=int(escrow_id), # escrow transaction sequence
 )
 
-response = client.request(acct_info)
-print("Response Status:", response.status)
-print("Account Info:")
-print(json.dumps(response.result, indent=4, sort_keys=True))
+print("\nSubmitting EscrowCancel (PAYER refunds)...")
+cancel_resp = submit_and_wait(cancel_escrow, client, payer_test_wallet)
+print(json.dumps(cancel_resp.result, indent=2))
 
-# --------------------------
-# Step 4: Define a time-lock for escrow
-# --------------------------
-# Define when the funds can be released (UTC)
-release_date_utc = datetime.datetime(2026, 1, 15, 0, 0, 0, tzinfo=datetime.timezone.utc)
-# Convert UTC timestamp to Ripple epoch (seconds since 2000-01-01)
-release_date_ripple = int(release_date_utc.timestamp()) - 946684800
-print(f"\nFunds will be locked until UTC {release_date_utc}")
-print(f"Ripple Epoch Time: {release_date_ripple}")
-
-# --------------------------
-# Step 5: Define escrow transaction parameters
-# --------------------------
-# Example: Sending 10 XRP to another Testnet account
-amount_to_escrow = 10
-receiver_addr = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"  # Replace with recipient testnet account
-
-# Optional: Set escrow expiration (cancel_after) if desired
-expiry_date_utc = datetime.datetime(2026, 2, 15, 0, 0, 0, tzinfo=datetime.timezone.utc)
-expiry_date_ripple = int(expiry_date_utc.timestamp()) - 946684800
-
-# --------------------------
-# Step 6: Build the EscrowCreate transaction
-# --------------------------
-create_txn = EscrowCreate(
-    account=test_account,
-    amount=xrp_to_drops(amount_to_escrow),
-    destination=receiver_addr,
-    finish_after=release_date_ripple,  # lock until this timestamp
-    cancel_after=expiry_date_ripple    # optional: escrow expires if not claimed
-    # condition=condition             # optional: for conditional release (not used for simple time-lock)
-)
-
-print("\nEscrow Transaction Built:")
-print(json.dumps(create_txn.to_dict(), indent=4))
-
-# --------------------------
-# Step 7: Sign and submit the escrow transaction
-# --------------------------
-print("\nSubmitting escrow transaction...")
-# Sign and submit transaction safely
-stxn_response = send_reliable_submission(create_txn, client, test_wallet)
-
-# --------------------------
-# Step 8: Parse and display transaction result
-# --------------------------
-stxn_result = stxn_response.result
-
-print("\nEscrow Transaction Result:")
-print("Account:", stxn_result["tx_json"]["Account"])
-print("Sequence:", stxn_result["tx_json"]["Sequence"])
-print("Transaction Result:", stxn_result["meta"]["TransactionResult"])
-print("Transaction Hash:", stxn_result["hash"])
-print("\nCheck transaction on Testnet Explorer:")
-print(f"https://testnet.xrpl.org/transactions/{stxn_result['hash']}")
 
