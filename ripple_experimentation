@@ -1,0 +1,108 @@
+"""
+XRPL Python Example: Wallet Creation + Account Info + Time-Locked Escrow
+This script demonstrates:
+1. Connecting to the XRPL Testnet
+2. Creating a new test wallet and funding it
+3. Retrieving account information
+4. Creating a time-locked escrow transaction
+"""
+
+# --------------------------
+# Import required libraries
+# --------------------------
+from xrpl.clients import JsonRpcClient
+from xrpl.wallet import generate_faucet_wallet
+from xrpl.models.requests.account_info import AccountInfo
+from xrpl.models.transactions import EscrowCreate
+from xrpl.transaction import safe_sign_and_submit_transaction, send_reliable_submission
+from xrpl.utils import xrp_to_drops
+import datetime
+import json
+
+# --------------------------
+# Step 1: Connect to XRPL Testnet
+# --------------------------
+json_rpc_url = "https://s.altnet.rippletest.net:51234/"
+client = JsonRpcClient(json_rpc_url)
+print("Connected to XRPL Testnet at:", json_rpc_url)
+
+# --------------------------
+# Step 2: Create a new wallet and fund with Testnet XRP
+# --------------------------
+print("\nCreating a new wallet and funding it with Testnet XRP...")
+test_wallet = generate_faucet_wallet(client, debug=True)
+test_account = test_wallet.classic_address
+print(f"Wallet Address: {test_account}")
+print(f"Testnet Explorer URL: https://testnet.xrpl.org/accounts/{test_account}")
+
+# --------------------------
+# Step 3: Get account info for this wallet
+# --------------------------
+print("\nFetching account info...")
+acct_info = AccountInfo(
+    account=test_account,
+    ledger_index="validated",
+    strict=True,
+)
+
+response = client.request(acct_info)
+print("Response Status:", response.status)
+print("Account Info:")
+print(json.dumps(response.result, indent=4, sort_keys=True))
+
+# --------------------------
+# Step 4: Define a time-lock for escrow
+# --------------------------
+# Define when the funds can be released (UTC)
+release_date_utc = datetime.datetime(2026, 1, 15, 0, 0, 0, tzinfo=datetime.timezone.utc)
+# Convert UTC timestamp to Ripple epoch (seconds since 2000-01-01)
+release_date_ripple = int(release_date_utc.timestamp()) - 946684800
+print(f"\nFunds will be locked until UTC {release_date_utc}")
+print(f"Ripple Epoch Time: {release_date_ripple}")
+
+# --------------------------
+# Step 5: Define escrow transaction parameters
+# --------------------------
+# Example: Sending 10 XRP to another Testnet account
+amount_to_escrow = 10
+receiver_addr = "rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe"  # Replace with recipient testnet account
+
+# Optional: Set escrow expiration (cancel_after) if desired
+expiry_date_utc = datetime.datetime(2026, 2, 15, 0, 0, 0, tzinfo=datetime.timezone.utc)
+expiry_date_ripple = int(expiry_date_utc.timestamp()) - 946684800
+
+# --------------------------
+# Step 6: Build the EscrowCreate transaction
+# --------------------------
+create_txn = EscrowCreate(
+    account=test_account,
+    amount=xrp_to_drops(amount_to_escrow),
+    destination=receiver_addr,
+    finish_after=release_date_ripple,  # lock until this timestamp
+    cancel_after=expiry_date_ripple    # optional: escrow expires if not claimed
+    # condition=condition             # optional: for conditional release (not used for simple time-lock)
+)
+
+print("\nEscrow Transaction Built:")
+print(json.dumps(create_txn.to_dict(), indent=4))
+
+# --------------------------
+# Step 7: Sign and submit the escrow transaction
+# --------------------------
+print("\nSubmitting escrow transaction...")
+# Sign and submit transaction safely
+stxn_response = send_reliable_submission(create_txn, client, test_wallet)
+
+# --------------------------
+# Step 8: Parse and display transaction result
+# --------------------------
+stxn_result = stxn_response.result
+
+print("\nEscrow Transaction Result:")
+print("Account:", stxn_result["tx_json"]["Account"])
+print("Sequence:", stxn_result["tx_json"]["Sequence"])
+print("Transaction Result:", stxn_result["meta"]["TransactionResult"])
+print("Transaction Hash:", stxn_result["hash"])
+print("\nCheck transaction on Testnet Explorer:")
+print(f"https://testnet.xrpl.org/transactions/{stxn_result['hash']}")
+
